@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Вопросы и обсуждения · Questions & discussions
+    url: https://github.com/LuckyDapf/LuckyIDE/discussions
+    about: Задайте вопрос или покажите, как используете Lucky IDE · Ask a question or show your setup
+  - name: Как собрать проект · Build instructions
+    url: https://github.com/LuckyDapf/LuckyIDE#сборка
+    about: Шаги сборки под Windows · Windows build steps

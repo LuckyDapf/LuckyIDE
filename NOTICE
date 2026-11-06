@@ -1,0 +1,27 @@
+Lucky IDE
+Copyright 2025-2026 Lucky IDE contributors
+
+This product is a fork of the Void editor (https://github.com/voideditor/void),
+which is a fork of Visual Studio Code (https://github.com/microsoft/vscode).
+
+Third-party components and their licenses:
+
+  * Visual Studio Code
+    Copyright (c) Microsoft Corporation
+    Licensed under the MIT License (see LICENSE-VS-Code.txt)
+
+  * Void editor additions
+    Copyright 2025 Glass Devtools, Inc.
+    Licensed under the Apache License, Version 2.0 (see LICENSE.txt)
+
+  * Lucky IDE additions and modifications
+    Copyright 2025-2026 Lucky IDE contributors
+    Licensed under the Apache License, Version 2.0 (see LICENSE.txt)
+
+Additional third-party notices are listed in ThirdPartyNotices.txt and
+cglicenses.json. Those files must be kept as-is when redistributing this
+product.
+
+"Visual Studio Code" and "VS Code" are trademarks of Microsoft Corporation.
+"Void" is a project of Glass Devtools, Inc. This fork is not affiliated with,
+endorsed by, or sponsored by either of them.

@@ -6,31 +6,56 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   compile-and-test:
-    runs-on: windows-latest
+    # Ubuntu 22.04: GCC 11 / Python 3.10 reliably compile the VS Code 1.99 native modules
+    runs-on: ubuntu-22.04
     timeout-minutes: 60
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20.18.3'
+          node-version-file: '.nvmrc'
           cache: npm
 
+      - name: Install system dependencies (native modules)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 pkg-config \
+            libx11-dev libxkbfile-dev libkrb5-dev
+
       - name: Install dependencies
-        run: npm ci
         env:
-          npm_config_build_from_source: true
+          # compile and test-node run in plain Node; the official VS Code pipeline skips these too
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for i in 1 2 3; do
+            if npm ci; then break; fi
+            if [ "$i" -eq 3 ]; then
+              echo "npm ci failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "npm ci failed (attempt $i), retrying..."
+          done
 
       - name: Build React bundles
         run: npm run buildreact
 
       - name: Compile TypeScript
         run: npm run compile
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
 
       - name: Run unit tests
         run: npm run test-node

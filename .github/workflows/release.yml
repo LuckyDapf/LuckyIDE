@@ -1,0 +1,154 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win32
+            arch: x64
+          - os: windows-11-arm
+            platform: win32
+            arch: arm64
+          - os: ubuntu-22.04
+            platform: linux
+            arch: x64
+          - os: ubuntu-22.04-arm
+            platform: linux
+            arch: arm64
+          - os: macos-13
+            platform: darwin
+            arch: x64
+          - os: macos-14
+            platform: darwin
+            arch: arm64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 pkg-config \
+            libx11-dev libxkbfile-dev libkrb5-dev fakeroot rpm dpkg-dev
+
+      - name: Install dependencies
+        shell: bash
+        env:
+          # gulp-electron downloads its own Electron during packaging, like the official pipeline
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for i in 1 2 3; do
+            if npm ci; then break; fi
+            if [ "$i" -eq 3 ]; then
+              echo "npm ci failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "npm ci failed (attempt $i), retrying..."
+          done
+
+      - name: Build React bundles
+        run: npm run buildreact
+
+      - name: Compile, minify and package
+        run: npm run gulp vscode-${{ matrix.platform }}-${{ matrix.arch }}-min
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build installers (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          npm run gulp vscode-win32-${{ matrix.arch }}-inno-updater
+          npm run gulp vscode-win32-${{ matrix.arch }}-system-setup vscode-win32-${{ matrix.arch }}-user-setup
+
+      - name: Build installers (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          npm run gulp vscode-linux-${{ matrix.arch }}-prepare-deb
+          npm run gulp vscode-linux-${{ matrix.arch }}-build-deb
+          npm run gulp vscode-linux-${{ matrix.arch }}-prepare-rpm
+          npm run gulp vscode-linux-${{ matrix.arch }}-build-rpm
+
+      - name: Collect artifacts (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path .build/release | Out-Null
+          $ver = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF.Substring(10) } else { (Get-Content -Raw package.json | ConvertFrom-Json).version }
+          7z.exe a -tzip ".build/release/LuckyIDE-win32-${{ matrix.arch }}-$ver.zip" "../VSCode-win32-${{ matrix.arch }}/*"
+          Copy-Item ".build/win32-${{ matrix.arch }}/system-setup/VSCodeSetup.exe" ".build/release/LuckyIDESetup-${{ matrix.arch }}-$ver.exe"
+          Copy-Item ".build/win32-${{ matrix.arch }}/user-setup/VSCodeSetup.exe" ".build/release/LuckyIDEUserSetup-${{ matrix.arch }}-$ver.exe"
+
+      - name: Collect artifacts (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p .build/release
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then ver="${GITHUB_REF#refs/tags/v}"; else ver=$(node -p "require('./package.json').version"); fi
+          tar -czf ".build/release/LuckyIDE-linux-${{ matrix.arch }}-$ver.tar.gz" -C .. "VSCode-linux-${{ matrix.arch }}"
+          find .build/linux/deb -name '*.deb' -exec cp {} .build/release/ \;
+          find .build/linux/rpm -name '*.rpm' -exec cp {} .build/release/ \;
+
+      - name: Collect artifacts (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p .build/release
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then ver="${GITHUB_REF#refs/tags/v}"; else ver=$(node -p "require('./package.json').version"); fi
+          (cd .. && zip -Xry "$GITHUB_WORKSPACE/.build/release/LuckyIDE-darwin-${{ matrix.arch }}-$ver.zip" "VSCode-darwin-${{ matrix.arch }}")
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: luckyide-${{ matrix.platform }}-${{ matrix.arch }}
+          path: .build/release/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

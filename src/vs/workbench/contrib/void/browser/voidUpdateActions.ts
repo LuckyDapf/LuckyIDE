@@ -16,12 +16,13 @@ import * as dom from '../../../../base/browser/dom.js';
 import { IUpdateService } from '../../../../platform/update/common/update.js';
 import { VoidCheckUpdateRespose } from '../common/voidUpdateServiceTypes.js';
 import { IAction } from '../../../../base/common/actions.js';
+import { PRODUCT_RELEASES_URL } from '../common/branding.js';
 
 
 
 
 const notifyUpdate = (res: VoidCheckUpdateRespose & { message: string }, notifService: INotificationService, updateService: IUpdateService): INotificationHandle => {
-	const message = res?.message || 'This is a very old version of Lucky IDE, please download the latest version! [Lucky IDE Editor](https://voideditor.com/download-beta)!'
+	const message = res?.message || `This is a very old version of Lucky IDE, please download the latest version! [Lucky IDE Editor](${PRODUCT_RELEASES_URL})!`
 
 	let actions: INotificationActions | undefined
 
@@ -37,7 +38,7 @@ const notifyUpdate = (res: VoidCheckUpdateRespose & { message: string }, notifSe
 				class: undefined,
 				run: () => {
 					const { window } = dom.getActiveWindow()
-					window.open('https://voideditor.com/download-beta')
+					window.open(PRODUCT_RELEASES_URL)
 				}
 			})
 		}
@@ -90,7 +91,7 @@ const notifyUpdate = (res: VoidCheckUpdateRespose & { message: string }, notifSe
 			class: undefined,
 			run: () => {
 				const { window } = dom.getActiveWindow()
-				window.open('https://voideditor.com/')
+				window.open(PRODUCT_RELEASES_URL)
 			}
 		})
 
@@ -127,7 +128,7 @@ const notifyUpdate = (res: VoidCheckUpdateRespose & { message: string }, notifSe
 	// })
 }
 const notifyErrChecking = (notifService: INotificationService): INotificationHandle => {
-	const message = `Lucky IDE Error: There was an error checking for updates. If this persists, please get in touch or reinstall Lucky IDE [here](https://voideditor.com/download-beta)!`
+	const message = `Lucky IDE Error: There was an error checking for updates. If this persists, please get in touch or reinstall Lucky IDE [here](${PRODUCT_RELEASES_URL})!`
 	const notifController = notifService.notify({
 		severity: Severity.Info,
 		message: message,

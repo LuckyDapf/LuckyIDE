@@ -19,6 +19,7 @@ import { ChatMode, displayInfoOfProviderName, ModelSelectionOptions, OverridesOf
 import { getSendableReasoningInfo, getModelCapabilities, getProviderCapabilities, defaultProviderSettings, getReservedOutputTokenSpace } from '../../common/modelCapabilities.js';
 import { extractReasoningWrapper, extractXMLToolsWrapper } from './extractGrammar.js';
 import { availableTools, InternalToolInfo } from '../../common/prompt/prompts.js';
+import { OPENROUTER_APP_HEADERS } from '../../common/branding.js';
 import { generateUuid } from '../../../../../base/common/uuid.js';
 
 const getGoogleApiKey = async () => {
@@ -100,8 +101,7 @@ const newOpenAICompatibleSDK = async ({ settingsOfProvider, providerName, includ
 			baseURL: 'https://openrouter.ai/api/v1',
 			apiKey: thisConfig.apiKey,
 			defaultHeaders: {
-				'HTTP-Referer': 'https://voideditor.com', // Optional, for including your app on openrouter.ai rankings.
-				'X-Title': 'Lucky IDE', // Optional. Shows in rankings on openrouter.ai.
+				...OPENROUTER_APP_HEADERS, // attribution on openrouter.ai rankings
 			},
 			...commonPayloadOpts,
 		})

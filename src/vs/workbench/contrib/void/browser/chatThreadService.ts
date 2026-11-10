@@ -43,6 +43,7 @@ import { IDirectoryStrService } from '../common/directoryStrService.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IMCPService } from '../common/mcpService.js';
 import { RawMCPToolCall } from '../common/mcpServiceTypes.js';
+import { IMarkerService, MarkerSeverity } from '../../../../platform/markers/common/markers.js';
 
 
 // related to retrying when LLM message has error
@@ -51,6 +52,11 @@ const RETRY_DELAY = 2500
 
 /** Сколько бесплатных моделей максимум перепробовать за один запрос. */
 const MAX_FREE_MODEL_SWITCHES = 8
+
+/** Сколько раундов самопроверки по диагностикам делать после финального ответа агента. */
+const MAX_SELF_CHECK_ROUNDS = 2
+/** Пауза перед чтением диагностик, чтобы языковые серверы успели обновиться. */
+const SELF_CHECK_DELAY = 1000
 
 /** Ошибки, при которых смена модели не поможет. */
 const looksLikeAuthError = (message?: string): boolean =>
@@ -339,6 +345,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		@IFileService private readonly _fileService: IFileService,
 		@IMCPService private readonly _mcpService: IMCPService,
 		@ICodebaseIndexService private readonly _codebaseIndexService: ICodebaseIndexService,
+		@IMarkerService private readonly _markerService: IMarkerService,
 	) {
 		super()
 		this.state = { allThreads: {}, currentThreadId: null as unknown as string } // default state
@@ -762,6 +769,32 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 
 
+	/** Файлы, успешно изменённые агентом начиная с startMessageIdx, у которых остались ошибки (Error) в диагностиках. */
+	private _editedFilesWithErrors(threadId: string, startMessageIdx: number): { uri: URI, errors: string[] }[] {
+		const messages = this.state.allThreads[threadId]?.messages ?? []
+		const editedURIs = new Map<string, URI>()
+		for (let i = startMessageIdx; i < messages.length; i += 1) {
+			const m = messages[i]
+			if (m.role !== 'tool' || m.type !== 'success') continue
+			if (m.name !== 'edit_file' && m.name !== 'rewrite_file' && m.name !== 'create_file_or_folder') continue
+			const params = m.params as BuiltinToolCallParams['edit_file'] | BuiltinToolCallParams['rewrite_file'] | BuiltinToolCallParams['create_file_or_folder']
+			if ('isFolder' in params && params.isFolder) continue
+			if (params.uri.scheme !== 'file') continue
+			editedURIs.set(params.uri.toString(), params.uri)
+		}
+
+		const ans: { uri: URI, errors: string[] }[] = []
+		for (const uri of editedURIs.values()) {
+			const errors = this._markerService.read({ resource: uri })
+				.filter(l => l.severity === MarkerSeverity.Error)
+				.slice(0, 10)
+				.map(l => `- line ${l.startLineNumber}: ${l.message}`)
+			if (errors.length) ans.push({ uri, errors })
+			if (ans.length >= 10) break
+		}
+		return ans
+	}
+
 	/** Следующая бесплатная модель, которую ещё не пробовали в этом запросе. */
 	private _nextFreeModelSelection(tried: Set<string>): ModelSelection | null {
 		const options = this._settingsService.state._modelOptions ?? []
@@ -806,6 +839,10 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		let nMessagesSent = 0
 		let shouldSendAnotherMessage = true
 		let isRunningWhenEnd: IsRunningType = undefined
+
+		// самопроверка по диагностикам: считаем только файлы, изменённые в этом запросе
+		let selfCheckRounds = 0
+		const runStartMessageIdx = this.state.allThreads[threadId]?.messages.length ?? 0
 
 		// before enter loop, call tool
 		if (callThisToolFirst) {
@@ -984,6 +1021,24 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					else { shouldSendAnotherMessage = true }
 
 					this._setStreamState(threadId, { isRunning: 'idle', interrupt: 'not_needed' }) // just decorative, for clarity
+				}
+				else if (chatMode === 'agent' && selfCheckRounds < MAX_SELF_CHECK_ROUNDS) {
+					// финальный ответ без инструмента: проверяем, не остались ли ошибки в изменённых файлах
+					this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })
+					await timeout(SELF_CHECK_DELAY) // даём языковым серверам обновить диагностики
+					if (interruptedWhenIdle) {
+						this._setStreamState(threadId, undefined)
+						return
+					}
+					const filesWithErrors = this._editedFilesWithErrors(threadId, runStartMessageIdx)
+					if (filesWithErrors.length) {
+						selfCheckRounds += 1
+						const report = filesWithErrors.map(({ uri, errors }) => `${uri.fsPath}:\n${errors.join('\n')}`).join('\n\n')
+						const content = `Automatic self-check: the language server still reports errors in files you edited during this request:\n\n${report}\n\nFix the errors caused by your changes using the edit_file tool, then verify your fix. Ignore errors that existed before your changes or are unrelated to them, and briefly say so.`
+						this._addUserCheckpoint({ threadId })
+						this._addMessageToThread(threadId, { role: 'user', content, displayContent: 'Самопроверка: найдены ошибки в изменённых файлах — исправляю.', selections: null, state: defaultMessageState })
+						shouldSendAnotherMessage = true
+					}
 				}
 
 			} // end while (attempts)

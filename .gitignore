@@ -52,3 +52,6 @@ src/vs/workbench/contrib/void/browser/react/src2/**
 .branding-backup/
 LuckyIDE-clean-profile.cmd
 
+# unrelated local projects
+craft-anything-*/
+

@@ -4,6 +4,7 @@ import { IModelService } from '../../../../editor/common/services/model.js';
 import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
+import { IFileService } from '../../../../platform/files/common/files.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { ChatMessage } from '../common/chatThreadServiceTypes.js';
 import { getIsReasoningEnabledState, getReservedOutputTokenSpace, getModelCapabilities } from '../common/modelCapabilities.js';
@@ -18,6 +19,7 @@ import { URI } from '../../../../base/common/uri.js';
 import { EndOfLinePreference } from '../../../../editor/common/model.js';
 import { ToolName } from '../common/toolsServiceTypes.js';
 import { IMCPService } from '../common/mcpService.js';
+import { combineApplicableRules, parseProjectRuleFile, ProjectRule } from '../common/projectRules.js';
 
 export const EMPTY_MESSAGE = '(empty message)'
 
@@ -271,7 +273,7 @@ const prepareOpenAIOrAnthropicMessages = ({
 	// A COMPLETE HACK: last message is system message for context purposes
 
 	const sysMsgParts: string[] = []
-	if (aiInstructions) sysMsgParts.push(`GUIDELINES (from the user's .voidrules file):\n${aiInstructions}`)
+	if (aiInstructions) sysMsgParts.push(`GUIDELINES (from the user's global instructions and project rules files):\n${aiInstructions}`)
 	if (systemMessage) sysMsgParts.push(systemMessage)
 	const combinedSystemMessage = sysMsgParts.join('\n\n')
 
@@ -541,36 +543,119 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		@IVoidSettingsService private readonly voidSettingsService: IVoidSettingsService,
 		@IVoidModelService private readonly voidModelService: IVoidModelService,
 		@IMCPService private readonly mcpService: IMCPService,
+		@IFileService private readonly fileService: IFileService,
 	) {
 		super()
-	}
-
-	// Read .voidrules files from workspace folders
-	private _getVoidRulesFileContents(): string {
-		try {
-			const workspaceFolders = this.workspaceContextService.getWorkspace().folders;
-			let voidRules = '';
-			for (const folder of workspaceFolders) {
-				const uri = URI.joinPath(folder.uri, '.voidrules')
-				const { model } = this.voidModelService.getModel(uri)
-				if (!model) continue
-				voidRules += model.getValue(EndOfLinePreference.LF) + '\n\n';
+		this._register(this.workspaceContextService.onDidChangeWorkspaceFolders(() => { void this._refreshProjectRules() }))
+		this._register(this.fileService.onDidFilesChange(e => {
+			for (const uri of [...e.rawAdded, ...e.rawUpdated, ...e.rawDeleted]) {
+				if (this._isRulesURI(uri)) {
+					void this._refreshProjectRules()
+					break
+				}
 			}
-			return voidRules.trim();
+		}))
+		void this._refreshProjectRules()
+	}
+
+	private static readonly MAX_RULE_FILE_CHARS = 32_000
+	private static readonly MAX_TOTAL_RULES_CHARS = 128_000
+
+	private _projectRulesCache: ProjectRule[] = []
+	private _projectRulesRefresh: Promise<void> | null = null
+
+	private _isRulesURI(uri: URI): boolean {
+		const path = uri.path.toLowerCase()
+		return path.endsWith('/.voidrules') || path.endsWith('/.luckyiderules') || path.includes('/.luckyide/rules/')
+	}
+
+	// Prefer the in-memory model so unsaved editor changes apply; otherwise read from disk.
+	private async _readRulesFile(uri: URI): Promise<string> {
+		const model = this.modelService.getModel(uri) ?? this.voidModelService.getModel(uri).model
+		if (model) return model.getValue(EndOfLinePreference.LF)
+		try {
+			const content = await this.fileService.readFile(uri)
+			return content.value.toString()
 		}
-		catch (e) {
-			return ''
+		catch {
+			return '' // missing or unreadable rules file is not an error
 		}
 	}
 
-	// Get combined AI instructions from settings and .voidrules files
+	private async _readProjectRules(): Promise<ProjectRule[]> {
+		const rules: ProjectRule[] = []
+		let totalChars = 0
+		const push = (content: string) => {
+			if (!content.trim()) return
+			const parsed = parseProjectRuleFile(content)
+			const body = parsed.body.slice(0, ConvertToLLMMessageService.MAX_RULE_FILE_CHARS)
+			if (!body) return
+			if (totalChars + body.length > ConvertToLLMMessageService.MAX_TOTAL_RULES_CHARS) return
+			rules.push({ ...parsed, body })
+			totalChars += body.length
+		}
+		for (const folder of this.workspaceContextService.getWorkspace().folders) {
+			const rulesDir = URI.joinPath(folder.uri, '.luckyide', 'rules')
+			try {
+				const stat = await this.fileService.resolve(rulesDir)
+				const ruleFiles = (stat.children ?? [])
+					.filter(child => !child.isDirectory && /\.(md|mdc)$/i.test(child.name))
+					.sort((a, b) => a.name.localeCompare(b.name))
+				for (const child of ruleFiles) {
+					push(await this._readRulesFile(child.resource))
+				}
+			}
+			catch {
+				// no .luckyide/rules directory in this folder
+			}
+			push(await this._readRulesFile(URI.joinPath(folder.uri, '.luckyiderules')))
+			push(await this._readRulesFile(URI.joinPath(folder.uri, '.voidrules'))) // legacy
+		}
+		return rules
+	}
+
+	private _refreshProjectRules(): Promise<void> {
+		if (!this._projectRulesRefresh) {
+			this._projectRulesRefresh = this._readProjectRules()
+				.then(rules => { this._projectRulesCache = rules })
+				.catch(() => { /* keep the last known rules on read failure */ })
+				.finally(() => { this._projectRulesRefresh = null })
+		}
+		return this._projectRulesRefresh
+	}
+
+	// Relative paths of files open in editors, for glob-scoped project rules.
+	private _openFileRelativePaths(): string[] {
+		const uris = new Map<string, URI>()
+		for (const model of this.modelService.getModels()) {
+			if (model.isAttachedToEditor()) uris.set(model.uri.toString(), model.uri)
+		}
+		const activeURI = this.editorService.activeEditor?.resource
+		if (activeURI) uris.set(activeURI.toString(), activeURI)
+
+		const paths: string[] = []
+		for (const uri of uris.values()) {
+			if (uri.scheme !== 'file') continue
+			const folder = this.workspaceContextService.getWorkspaceFolder(uri)
+			if (folder) {
+				const relative = uri.fsPath.slice(folder.uri.fsPath.length).replace(/\\/g, '/').replace(/^\//, '')
+				if (relative) paths.push(relative)
+			}
+			else {
+				paths.push(uri.fsPath.replace(/\\/g, '/'))
+			}
+		}
+		return paths
+	}
+
+	// Get combined AI instructions from settings and project rules files
 	private _getCombinedAIInstructions(): string {
 		const globalAIInstructions = this.voidSettingsService.state.globalSettings.aiInstructions;
-		const voidRulesFileContent = this._getVoidRulesFileContents();
+		const rulesText = combineApplicableRules(this._projectRulesCache, this._openFileRelativePaths())
 
 		const ans: string[] = []
 		if (globalAIInstructions) ans.push(globalAIInstructions)
-		if (voidRulesFileContent) ans.push(voidRulesFileContent)
+		if (rulesText) ans.push(rulesText)
 		return ans.join('\n\n')
 	}
 
@@ -685,7 +770,8 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 
 		const modelSelectionOptions = this.voidSettingsService.state.optionsOfModelSelection['Chat'][modelSelection.providerName]?.[modelSelection.modelName]
 
-		// Get combined AI instructions
+		// Get combined AI instructions (refresh rules from disk first so chat always sees the latest)
+		await this._refreshProjectRules()
 		const aiInstructions = this._getCombinedAIInstructions();
 		const isReasoningEnabled = getIsReasoningEnabledState('Chat', providerName, modelName, modelSelectionOptions, overridesOfModel)
 		const reservedOutputTokenSpace = getReservedOutputTokenSpace(providerName, modelName, { isReasoningEnabled, overridesOfModel })

@@ -7,5 +7,8 @@ ThirdPartyNotices.txt eol=crlf
 *.cmd eol=crlf
 *.ps1 eol=lf
 *.sh eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+.gitattributes text eol=lf
 *.rtf -text
 **/*.json linguist-language=jsonc

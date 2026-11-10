@@ -20,6 +20,9 @@ export const PRODUCT_SHORT_NAME = 'LuckyIDE';
  */
 export const PRODUCT_APP_URL = 'https://luckyide.dev';
 
+/** Где пользователи скачивают новые версии. */
+export const PRODUCT_RELEASES_URL = 'https://github.com/LuckyDapf/LuckyIDE/releases';
+
 /** Заголовки, по которым OpenRouter атрибутирует приложение. */
 export const OPENROUTER_APP_HEADERS = {
 	'HTTP-Referer': PRODUCT_APP_URL,

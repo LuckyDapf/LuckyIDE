@@ -17,16 +17,17 @@ import { IModelService } from '../../../../editor/common/services/model.js';
 import { extractCodeFromRegular } from '../common/helpers/extractCodeFromResult.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { ILLMMessageService } from '../common/sendLLMMessageService.js';
-import { isWindows } from '../../../../base/common/platform.js';
 import { IVoidSettingsService } from '../common/voidSettingsService.js';
 import { FeatureName } from '../common/voidSettingsTypes.js';
 import { IConvertToLLMMessageService } from './convertToLLMMessageService.js';
+import { buildAutocompleteContext } from '../common/autocompleteContext.js';
 // import { IContextGatheringService } from './contextGatheringService.js';
 
 
 
 const allLinebreakSymbols = ['\r\n', '\n']
-const _ln = isWindows ? allLinebreakSymbols[0] : allLinebreakSymbols[1]
+// внутри сервиса текст всегда LF (model.getValue(LF) и ответы LLM), поэтому разделитель — \n на всех платформах
+const _ln = '\n'
 
 // The extension this was called from is here - https://github.com/voideditor/void/blob/autocomplete/extensions/void/src/extension/extension.ts
 
@@ -147,6 +148,7 @@ type AutocompletionPredictionType =
 	| 'single-line-fill-middle'
 	| 'single-line-redo-suffix'
 	// | 'multi-line-start-here'
+	| 'multi-line-fill-middle'
 	| 'multi-line-start-on-next-line'
 	| 'do-not-predict'
 
@@ -550,9 +552,6 @@ const getCompletionOptions = (prefixAndSuffix: PrefixAndSuffixInfo, relevantCont
 	const isLinePrefixEmpty = removeAllWhitespace(prefixToTheLeftOfCursor).length === 0
 	const isLineSuffixEmpty = removeAllWhitespace(suffixToTheRightOfCursor).length === 0
 
-	// TODO add context to prefix
-	// llmPrefix = '\n\n/* Relevant context:\n' + relevantContext + '\n*/\n' + llmPrefix
-
 	// if we just accepted an autocompletion, predict a multiline completion starting on the next line
 	if (justAcceptedAutocompletion && isLineSuffixEmpty) {
 		const prefixWithNewline = prefix + _ln
@@ -566,7 +565,17 @@ const getCompletionOptions = (prefixAndSuffix: PrefixAndSuffixInfo, relevantCont
 	}
 	// if the current line is empty, predict a single-line completion
 	else if (isLineEmpty) {
-		completionOptions = {
+		// если предыдущая непустая строка открывает блок — предсказываем несколько строк сразу
+		const previousLines = prefixLines.slice(0, -1).filter(l => l.trim())
+		const previousLine = (previousLines[previousLines.length - 1] ?? '').trim()
+		const opensBlock = /[({[:,=]$/.test(previousLine) || previousLine.endsWith('=>')
+		completionOptions = opensBlock ? {
+			predictionType: 'multi-line-fill-middle',
+			shouldGenerate: true,
+			llmPrefix: prefix,
+			llmSuffix: suffix,
+			stopTokens: [`${_ln}${_ln}`] // двойные пустые строки ограничивают блок
+		} : {
 			predictionType: 'single-line-fill-middle',
 			shouldGenerate: true,
 			llmPrefix: prefix,
@@ -603,6 +612,11 @@ const getCompletionOptions = (prefixAndSuffix: PrefixAndSuffixInfo, relevantCont
 			llmSuffix: suffix,
 			stopTokens: []
 		}
+	}
+
+	// контекст из других открытых файлов добавляется в начало префикса как комментарии
+	if (relevantContext) {
+		completionOptions.llmPrefix = relevantContext + completionOptions.llmPrefix
 	}
 
 	return completionOptions
@@ -678,20 +692,11 @@ export class AutocompleteService extends Disposable implements IAutocompleteServ
 		// if there is a cached autocompletion, return it
 		if (cachedAutocompletion && autocompletionMatchup) {
 
-			console.log('AA')
-
-
-			// console.log('id: ' + cachedAutocompletion.id)
-
 			if (cachedAutocompletion.status === 'finished') {
-				console.log('A1')
-
 				const inlineCompletions = toInlineCompletions({ autocompletionMatchup, autocompletion: cachedAutocompletion, prefixAndSuffix, position, debug: true })
 				return inlineCompletions
 
 			} else if (cachedAutocompletion.status === 'pending') {
-				console.log('A2')
-
 				try {
 					await cachedAutocompletion.llmPromise;
 					const inlineCompletions = toInlineCompletions({ autocompletionMatchup, autocompletion: cachedAutocompletion, prefixAndSuffix, position })
@@ -702,10 +707,6 @@ export class AutocompleteService extends Disposable implements IAutocompleteServ
 					console.error('Error creating autocompletion (1): ' + e)
 				}
 
-			} else if (cachedAutocompletion.status === 'error') {
-				console.log('A3')
-			} else {
-				console.log('A4')
 			}
 
 			return []
@@ -753,12 +754,20 @@ export class AutocompleteService extends Disposable implements IAutocompleteServ
 		}
 
 
-		// gather relevant context from the code around the user's selection and definitions
-		// const relevantSnippetsList = await this._contextGatheringService.readCachedSnippets(model, position, 3);
-		// const relevantSnippetsList = this._contextGatheringService.getCachedSnippets();
-		// const relevantSnippets = relevantSnippetsList.map((text) => `${text}`).join('\n-------------------------------\n')
-		// console.log('@@---------------------\n' + relevantSnippets)
-		const relevantContext = ''
+		// контекст из других открытых файлов того же языка (активный файл идёт первым)
+		const activeURI = this._editorService.activeEditor?.resource
+		const openModels = this._modelService.getModels()
+			.filter(m => m.isAttachedToEditor() && m.uri.scheme === 'file' && m.uri.toString() !== model.uri.toString())
+			.sort((a, b) => Number(b.uri.toString() === activeURI?.toString()) - Number(a.uri.toString() === activeURI?.toString()))
+		const relevantContext = buildAutocompleteContext({
+			currentUri: model.uri.fsPath,
+			languageId: model.getLanguageId(),
+			files: openModels.map(m => ({
+				uri: m.uri.fsPath,
+				languageId: m.getLanguageId(),
+				text: m.getValueInRange(new Range(1, 1, Math.min(m.getLineCount(), 60) + 1, 1)),
+			})),
+		})
 
 		const { shouldGenerate, predictionType, llmPrefix, llmSuffix, stopTokens } = getCompletionOptions(prefixAndSuffix, relevantContext, justAcceptedAutocompletion)
 
@@ -786,8 +795,6 @@ export class AutocompleteService extends Disposable implements IAutocompleteServ
 			requestId: null,
 			_newlineCount: 0,
 		}
-
-		console.log('starting autocomplete...', predictionType)
 
 		const featureName: FeatureName = 'Autocomplete'
 		const overridesOfModel = this._settingsService.state.overridesOfModel
@@ -931,7 +938,6 @@ export class AutocompleteService extends Disposable implements IAutocompleteServ
 					const matchup = removeAllWhitespace(prefix) === removeAllWhitespace(autocompletion.prefix + autocompletion.insertText)
 
 					if (matchup) {
-						console.log('ACCEPT', autocompletion.id)
 						this._lastCompletionAccept = Date.now()
 						this._autocompletionsOfDocument[docUriStr].delete(autocompletion.id);
 					}

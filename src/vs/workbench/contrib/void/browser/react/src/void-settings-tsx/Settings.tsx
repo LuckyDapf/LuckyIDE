@@ -1667,8 +1667,7 @@ export const Settings = () => {
 									<h2 className={`text-3xl mb-2`}>AI Instructions</h2>
 									<h4 className={`text-void-fg-3 mb-4`}>
 										<ChatMarkdownRender inPTag={true} string={`
-System instructions to include with all AI requests.
-Alternatively, place a \`.voidrules\` file in the root of your workspace.
+System instructions to include with all AI requests. Project rules are also read from \`.luckyiderules\` in the workspace root and from \`.md\` files in \`.luckyide/rules/\`. Rules support \`globs:\` frontmatter to apply only to matching open files.
 								`} chatMessageLocation={undefined} />
 									</h4>
 									<ErrorBoundary>

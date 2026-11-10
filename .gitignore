@@ -38,6 +38,7 @@ src/vs/workbench/contrib/void/browser/react/src2/**
 /dist/
 *.vsix
 *.zip
+!src/vs/base/test/node/zip/fixtures/*.zip
 *.7z
 
 # runtime state

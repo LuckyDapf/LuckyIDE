@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*.*.*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (created automatically if missing)'
+        required: true
+        default: 'v1.1.1'
 
 permissions:
   contents: read
@@ -103,27 +108,35 @@ jobs:
       - name: Collect artifacts (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.tag }}
         run: |
           New-Item -ItemType Directory -Force -Path .build/release | Out-Null
-          $ver = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF.Substring(10) } else { (Get-Content -Raw package.json | ConvertFrom-Json).version }
+          $ver = if ($env:RELEASE_TAG) { $env:RELEASE_TAG.TrimStart('v') } else { (Get-Content -Raw package.json | ConvertFrom-Json).version }
           7z.exe a -tzip ".build/release/LuckyIDE-win32-${{ matrix.arch }}-$ver.zip" "../VSCode-win32-${{ matrix.arch }}/*"
           Copy-Item ".build/win32-${{ matrix.arch }}/system-setup/VSCodeSetup.exe" ".build/release/LuckyIDESetup-${{ matrix.arch }}-$ver.exe"
           Copy-Item ".build/win32-${{ matrix.arch }}/user-setup/VSCodeSetup.exe" ".build/release/LuckyIDEUserSetup-${{ matrix.arch }}-$ver.exe"
 
       - name: Collect artifacts (Linux)
         if: runner.os == 'Linux'
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.tag }}
         run: |
           mkdir -p .build/release
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then ver="${GITHUB_REF#refs/tags/v}"; else ver=$(node -p "require('./package.json').version"); fi
+          ver="${RELEASE_TAG#v}"
+          if [ -z "$ver" ]; then ver=$(node -p "require('./package.json').version"); fi
           tar -czf ".build/release/LuckyIDE-linux-${{ matrix.arch }}-$ver.tar.gz" -C .. "VSCode-linux-${{ matrix.arch }}"
           find .build/linux/deb -name '*.deb' -exec cp {} .build/release/ \;
           find .build/linux/rpm -name '*.rpm' -exec cp {} .build/release/ \;
 
       - name: Collect artifacts (macOS)
         if: runner.os == 'macOS'
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.tag }}
         run: |
           mkdir -p .build/release
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then ver="${GITHUB_REF#refs/tags/v}"; else ver=$(node -p "require('./package.json').version"); fi
+          ver="${RELEASE_TAG#v}"
+          if [ -z "$ver" ]; then ver=$(node -p "require('./package.json').version"); fi
           (cd .. && zip -Xry "$GITHUB_WORKSPACE/.build/release/LuckyIDE-darwin-${{ matrix.arch }}-$ver.zip" "VSCode-darwin-${{ matrix.arch }}")
 
       - name: Upload artifacts
@@ -135,7 +148,7 @@ jobs:
 
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -149,6 +162,7 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.tag }}
           files: artifacts/*
           generate_release_notes: true
           fail_on_unmatched_files: true
